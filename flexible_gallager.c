@@ -10,13 +10,16 @@
 #include <math.h>
 #include <pthread.h>
 #include <pthread.h>
+#include "flexible_gallager.h"
 
 #define ITER_CHUNK 1000
 #define NUM_CORES sysconf(_SC_NPROCESSORS_ONLN)
 
 int n, m;	// size of parity check matrix
 int iter;	// number of iterations per one signal
-int sig_iter; // number of signals to try
+int max_iter; // maximum number of bp iterations to run
+float target_ber; // target ber to achieve after bp
+char filepath[256];
 char filename[100];	// file name for parity check matrix
 char **parity_matrix;	// parity check matrix
 float ber = 0.01;
@@ -28,73 +31,11 @@ int depth;	// depth of the flexible code
 int level;	// level of depth you want to use for decoding
 int **deg_pairs;	// degree pairs for each depth
 
-/* Node structure */
-struct node {
-	int deg;
-	int *neighbors;
-	int *neighbor_ports;
-	int port_temp;
-	char *recv_msg;
-	char *send_msg;
-};
 
-/* Thread data structure
- * to be passed to each threads */
-struct thread_data{
-	int sig_iter_per_core;
-	int cpu;
-};
+void set_up_nodes(*var_nodes, *check_nodes){
+	int i,j; // integers for for loops
 
-
-
-int core_affinitize(int core){
-	cpu_set_t *cmask;
-	int ret;
-	/*For NUMA setting*/
-	struct bitmask *bmask;
-	FILE *fp;
-	int phy_id;
-	if (core < 0 || core >= (int) n) {
-		errno = -EINVAL;
-		return -1;
-	}
-	if((cmask = CPU_ALLOC(n)) == NULL)
-		perror("CPU ALLOC");
-
-	CPU_ZERO_S(NUM_CORES, cmask);
-	CPU_SET_S(core, NUM_CORES, cmask);
-	ret = sched_setaffinity(0, NUM_CORES, cmask);
-	CPU_FREE(cmask);
-	printf("Core %d affinitzied\n", core);
-	return ret;
-}
-
-
-void *thr_func(void *arg){
-
-	/* Retrieving data */
-	struct thread_data *thr_data = (struct thread_data *)arg;
-	int sig_iter = thr_data->sig_iter_per_core;
-	int cpu = thr_data->cpu;
-
-	core_affinitize(cpu);
-
-	/* initialize var/check nodes */
-	int i,j,l,t,c=0;
-	struct node var_nodes[n];
-	struct node check_nodes[m];
-
-
-	/* Initialize degrees.
-	   This step can be skipped if it's a regular code */
-	for (i = 0; i < n; i++){
-		var_nodes[i].deg = 0;
-	}
-	for (j = 0; j < m; j++){
-		check_nodes[j].deg = 0;
-	}
-
-	for (i = 0; i < m; i++){
+	for (i = 0; i < _m; i++){
 		for(j = 0; j < n ; j++){
 			if (parity_matrix[i][j] == 1){
 				var_nodes[j].deg++;
@@ -114,7 +55,7 @@ void *thr_func(void *arg){
 		var_nodes[i].port_temp = 0;
 	}
 
-	for (i = 0; i < m; i++){
+	for (i = 0; i < _m; i++){
 		check_nodes[i].neighbors = malloc(check_nodes[i].deg * sizeof(int));
 		check_nodes[i].neighbor_ports = malloc(check_nodes[i].deg * sizeof(int));
 		check_nodes[i].send_msg = malloc(check_nodes[i].deg * sizeof(char));
@@ -123,9 +64,9 @@ void *thr_func(void *arg){
 	}
 
 	/* Initialize connections between nodes
-	 * Construct port-to-prot connections
+	 * Construct port-to-port connections
 	 */
-	for(i = 0; i < m; i++){
+	for(i = 0; i < _m; i++){
 		for(j = 0; j < n; j++){
 			if(parity_matrix[i][j] == 1){
 				var_nodes[j].neighbors[var_nodes[j].port_temp] = i;
@@ -137,34 +78,28 @@ void *thr_func(void *arg){
 			}
 		}
 	}
-	
-	int parity;
-	/* TODO: Need improvement. */
+}
+
+
+int*  calc_threshold(*var_nodes, *check_nodes){
 	double Al = 0;
-	for (i = 0; i < m; i++){
-		Al += pow((double)(1-2*ber), check_nodes[i].deg)/(double)m;
+	for (d = 0; d < level; d++){
+		Al += (double)m_l[d] / (double)m_l_tot * pow((double)(1-2*ber), deg_pairs[d][1] - 1);
 	}
 	int b[n];
 	for (i = 0; i < n; i++){
 		b[i] = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
+		b[i] = b[i] > var_nodes[i].deg? var_nodes[i].deg : b[i];
 	}
-	int iter_chunks = 0;
-	FILE *write_fp;
-	char write_filename[200];
-	if (is_flexible) sprintf(write_filename, "./results_details/%s_%diter_%dsig_%.4fBER_%dlevel_CORE%d", filename,iter,sig_iter, ber, level, cpu);
-	else sprintf(write_filename, "./results_details/%s_%diter_%dsig_%.4fBER_CORE%d", filename,iter,sig_iter, ber, cpu); 
 
-	write_fp = fopen(write_filename, "w");
-	
+	return b;
+}
+
+void beleif_proapagation(*var_nodes, *check_nodes){
+	int parity;
 	char signal[n];
-	//char belief[n];
 	int error_per_iter;
 	float r;
-
-	for (t = 0; t < sig_iter; t++){
-	if ((t+1) % ITER_CHUNK == 0){
-		printf("CORE %d: %d Done.\n", cpu, ++iter_chunks * ITER_CHUNK);
-	}	
 
 	/* Signal initialization */
 	error_per_iter = 0;
@@ -176,13 +111,13 @@ void *thr_func(void *arg){
 		} else {
 			signal[i] = 0;
 		}
-		//belief[i] = signal[i];
+
 		/* Setting first variable messages */
 		for(c = 0; c < var_nodes[i].deg; c++){
 			var_nodes[i].send_msg[c] = signal[i];
 		}
 	}
-	
+
 	/* Start message passing algorithm */
 	for (l = 0; l < iter; l++){
 		/* check node operations
@@ -191,7 +126,7 @@ void *thr_func(void *arg){
 			- generate send messages
 	   */
 		error_per_iter = 0;
-		for(j = 0; j < m; j++){
+		for(j = 0; j < _m; j++){
 			parity = 0;
 			for (c = 0; c < check_nodes[j].deg; c++){
 				check_nodes[j].recv_msg[c] = var_nodes[check_nodes[j].neighbors[c]].send_msg[check_nodes[j].neighbor_ports[c]];
@@ -238,17 +173,10 @@ void *thr_func(void *arg){
 
 	fclose(write_fp);
 	return 0;
-
 }
 
+
 void *flexible_thr_func(void *arg){
-
-	/* Retrieving data */
-	struct thread_data *thr_data = (struct thread_data *)arg;
-	int sig_iter = thr_data->sig_iter_per_core;
-	int cpu = thr_data->cpu;
-
-	core_affinitize(cpu);
 
 	/* initialize var/check nodes */
 	int i,j,l,t,d,c=0;
@@ -436,7 +364,7 @@ int main(int argc, char *argv[]){
 	int i, j;
 	int opt;
 	FILE *fp;
-	bool n_flag = false, m_flag=false, i_flag=false, e_flag=false, t_flag=false, f_flag=false, l_flag=false, F_flag = false;
+	bool n_flag = false, m_flag=false, i_flag=false, e_flag=false, M_flag = false, T_flag=false, f_flag=false, p_flag = false, l_flag=false, F_flag = false;
 	while((opt=getopt(argc, argv, "n:m:f:i:e:t:c:l:Fh")) != -1){
 		switch(opt){
 			case 'n':
@@ -455,17 +383,20 @@ int main(int argc, char *argv[]){
 				ber = atof(optarg);
 				e_flag = true;
 				break;
-			case 't':
-				sig_iter = atoi(optarg);
-				t_flag = true;
+			case 'M':
+				max_iter = atoi(optarg);
+				M_flag = true;
+				break;
+			case 'T':
+				target_ber = atof(optarg);
+				T_flag = true;
+				break;
+			case 'p':
+				sprintf(filepath, "%s", optarg);
+				p_flag = true;
 				break;
 			case 'f':
-				sprintf(filename, "./%s", optarg);
-				fp = fopen(filename, "r");
-				if (fp == NULL){
-					fprintf(stderr, "Error opening file:%s\n", strerror(errno));
-					exit(EXIT_FAILURE);
-				}
+				sprintf(filename, "%s", optarg);
 				f_flag = true;
 				break;
 			case 'c':
@@ -488,7 +419,8 @@ int main(int argc, char *argv[]){
 		}
 	}
 
-	if (!(n_flag && m_flag && i_flag && e_flag && t_flag && f_flag)){
+	/* Check if all necessary arguments were give */
+	if (!(n_flag && m_flag && i_flag && e_flag && T_flag && f_flag)){
 		fprintf(stderr, "Usage: %s [-n n] [-m m] [-i #iterations] [-e bit-error rate] [-t #signals] [-f filename] [-c #cores] [-F] [-l #levels] \n", argv[0]);
 		exit(EXIT_FAILURE);
 	}
@@ -498,6 +430,30 @@ int main(int argc, char *argv[]){
 		exit(EXIT_FAILURE);
 	}
 
+	/* Open input files */
+	if(T_flag){
+		strcat(filepath,"/");
+		strcat(filepath, filename);	
+	} else{
+		strcpy(filepath, "./");
+		strcat(filepath, filename);
+	}
+	/* Opening file for parity check matrix */
+	fp = fopen(filepath, "r");
+	if (fp == NULL){
+		fprintf(stderr, "Error opening file:%s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	/* Opening file for code structure */
+	char code_str_filepath[256];
+	strcpy(code_str_filepath, filepath);
+	strcat(filepath, "_code_str");
+	code_str_fp = fopen(code_str_filepath, "r");
+	if (code_str_fp == NULL) {
+		fprintf(stderr, "Error opening file:%s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+	
 	/* Print out informations */
 	printf("Testing (%d, %d) ", n, m);
 	if (is_flexible) printf("flexible ");	
@@ -508,26 +464,35 @@ int main(int argc, char *argv[]){
 	printf("Reading parity matrix from the file: %s\n", filename);
 
 
-	if (is_flexible){
-		fscanf(fp, "%d", &depth);
-		deg_pairs = malloc(depth*sizeof(int*));
-		for (i=0; i < depth; i++){
-			deg_pairs[i] = malloc(2*sizeof(int));
-			fscanf(fp, "%d,%d", &deg_pairs[i][0], &deg_pairs[i][1]);
-		}
+	/* Read Code Structure */
+	/* 1. Read the depth */
+	fscanf(code_str_fp, "%d", &depth);
+	/* 2. Read min/max degree */
+	fscanf(code_str_fp, "%d %d", &min_deg, &max_deg);
+	/* 3. Read length, degree distribution for each level */
+	int m[depth];
+	float rho[depth][max_deg-min_deg];
+	for (i=0; i < depth; i++){
+		fscanf(code_str_fp, "%d", &m[i]);
+		for(j = min_deg; j <= max_deg; j++){
+			fscanf(code_str_fp, "%.4f" &&rho[i][j]);
+		}	
+	}
+	/* 4. Decide the code length to run */
+	m = 0;
+	for (i = 0; i < level; i++){
+		m += m[i];
 	}
 
 
-	/* Reading parity matrix from the file */ 
+	/* Reading a parity matrix */ 
 	parity_matrix = malloc(m * sizeof(char*));
 	for (i=0; i < m; i++){
 		parity_matrix[i] = malloc(n*sizeof(char));
 	}
-	
 	for (i=0; i < m; i++){
 		fscanf(fp, "%s", parity_matrix[i]);
 	}
-
 	for (i=0; i< m; i++){
 		for(j=0; j<n; j++){
 			if (parity_matrix[i][j]=='1'){
@@ -539,40 +504,40 @@ int main(int argc, char *argv[]){
 	}
 	fclose(fp);
 
-	
+	/* Initialze the node structures & connections */
+
+
+	/* Initialize the seed for random number generation */
 	time_t init_time;
 	srand((unsigned)time(&init_time));
-		
-	/* Multi thread version */
-	pthread_t thr[num_cores];
-	int ci, tc_result;
-	struct thread_data thread_datas[num_cores];
+	
+	/* Calculating threshold */
+	double Al = 0;
+	for (d = 0; d < level; d++){	
+		Al += (double)m_l[d] / (double)m_l_tot * pow((double)(1-2*ber), deg_pairs[d][1] - 1);
+	}
+	
+	int b[n];
+	for (i = 0; i < n; i++){
+		b[i] = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
+		b[i] = b[i] > var_nodes[i].deg? var_nodes[i].deg : b[i];
+	}
+	
 
-	for(ci = 0; ci < num_cores; ci++){
-		thread_datas[ci].sig_iter_per_core = sig_iter/num_cores;
-		if (ci == (num_cores-1)){
-			thread_datas[ci].sig_iter_per_core += sig_iter%num_cores;
-		}
-		thread_datas[ci].cpu = ci;
-		if (is_flexible){
-			if((tc_result = pthread_create(&thr[ci], NULL, flexible_thr_func, &thread_datas[ci]))){
-				fprintf(stderr, "pthred create error: %d\n", tc_result);
-				return EXIT_FAILURE;
-			}
-		}else{
-			if((tc_result = pthread_create(&thr[ci], NULL, thr_func, &thread_datas[ci]))){
-				fprintf(stderr, "pthred create error: %d\n", tc_result);
-				return EXIT_FAILURE;
-			}
-		}
-		
+	struct node var_nodes[n];
+	struct node check_nodes[m];
+	
+	set_up_nodes(var_nodes, check_nodes);
+
+	int num_iter = 1/target_ber * 100;
+	int t;
+
+	for (t = 0; t < num_iter; t++){
+		error_per_iter = beleif_propagation(var_nodes, check_nodes);
+
 	}
 
-	for(ci = 0; ci < num_cores; ci++){
-		pthread_join(thr[ci], NULL);
-	}
-
-	printf("Summing up the result..\n");
+	/*printf("Summing up the result..\n");
 	float ber_at_iter[iter];
 	char sum_filename[200];
 	for (i = 0; i < iter; i++){
@@ -611,7 +576,7 @@ int main(int argc, char *argv[]){
 		printf("%.4f\t\t", ber_at_iter[i]);
 	}
 	printf("\n");
-	fclose(fp);
+	fclose(fp);*/
 	return EXIT_SUCCESS;
 
 	}
