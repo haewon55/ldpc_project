@@ -16,9 +16,9 @@
 #define NUM_CORES sysconf(_SC_NPROCESSORS_ONLN)
 
 int n, m;	// size of parity check matrix
-int iter;	// number of iterations per one signal
 int max_iter; // maximum number of bp iterations to run
 float target_ber; // target ber to achieve after bp
+int min_deg, max_deg;
 char filepath[256];
 char filename[100];	// file name for parity check matrix
 char **parity_matrix;	// parity check matrix
@@ -32,8 +32,15 @@ int level;	// level of depth you want to use for decoding
 int **deg_pairs;	// degree pairs for each depth
 
 
-void set_up_nodes(*var_nodes, *check_nodes, _m, *rho){
+void set_up_nodes(struct node* var_nodes, struct node* check_nodes, int _m, float* rho){
 	int i,j; // integers for for loops
+
+	for (i = 0; i < _m; i++){
+		check_nodes[i].deg = 0;
+	}
+	for (j = 0; j < n; j++){
+		var_nodes[j].deg = 0;
+	}
 
 	for (i = 0; i < _m; i++){
 		for(j = 0; j < n ; j++){
@@ -56,9 +63,8 @@ void set_up_nodes(*var_nodes, *check_nodes, _m, *rho){
 		var_nodes[i].port_temp = 0;
 		/* Calculate threshold b*/
 		double Al = 0;
-		double x = (double)(1 -2*ber);
-		for (i = min_deg; i <= max_deg; i++){
-			Al += rho[i-min_deg]*pow(x, i);
+		for (j = 0; j < _m; j++){
+			Al += pow((double)(1-2*ber), check_nodes[j].deg)/(double)_m;
 		}
 		b  = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
 		var_nodes[i].b =  b > var_nodes[i].deg? var_nodes[i].deg : b;
@@ -90,12 +96,12 @@ void set_up_nodes(*var_nodes, *check_nodes, _m, *rho){
 }
 
 
-int* belief_proapagation(*var_nodes, *check_nodes){
+int* belief_propagation(struct node* var_nodes, struct node* check_nodes, int _m){
 	int i, j, l; // integers for for loops
 	int parity;
 	char signal[n];
 	float r;
-	int error_per_iter[max_iter];
+	int *error_per_iter = malloc(max_iter * sizeof(int));
 	for (i = 0; i < max_iter; i++){
 		error_per_iter[i] = 0;
 	}
@@ -105,14 +111,13 @@ int* belief_proapagation(*var_nodes, *check_nodes){
 		r = (double)rand() / (double)RAND_MAX;
 		if (r < ber){
 			signal[i] = 1;
-			error_per_iter++;
 		} else {
 			signal[i] = 0;
 		}
 
 		/* Setting first variable messages */
-		for(c = 0; c < var_nodes[i].deg; c++){
-			var_nodes[i].send_msg[c] = signal[i];
+		for(j = 0; j < var_nodes[i].deg; j++){
+			var_nodes[i].send_msg[j] = signal[i];
 		}
 	}
 
@@ -146,9 +151,9 @@ int* belief_proapagation(*var_nodes, *check_nodes){
 				parity += var_nodes[i].recv_msg[j];
 			}
 			for(j = 0; j < var_nodes[i].deg; j++){
-				if ((parity - var_nodes[i].recv_msg[j]) >=  b[i]){
+				if ((parity - var_nodes[i].recv_msg[j]) >=  var_nodes[i].b){
 					var_nodes[i].send_msg[j] = 1;
-				} else if((parity - var_nodes[i].recv_msg[j]) <= (var_nodes[i].deg - b[i]) ){
+				} else if((parity - var_nodes[i].recv_msg[j]) <= (var_nodes[i].deg - var_nodes[i].b) ){
 					var_nodes[i].send_msg[j] = 0;
 				} else{
 					var_nodes[i].send_msg[j] = signal[i];
@@ -168,9 +173,9 @@ int* belief_proapagation(*var_nodes, *check_nodes){
 int main(int argc, char *argv[]){
 	int i, j;
 	int opt;
-	FILE *fp;
-	bool n_flag = false, m_flag=false, i_flag=false, e_flag=false, M_flag = false, T_flag=false, f_flag=false, p_flag = false, l_flag=false, F_flag = false;
-	while((opt=getopt(argc, argv, "n:m:f:i:e:t:c:l:Fh")) != -1){
+	FILE *fp, *code_str_fp;
+	bool n_flag = false, m_flag=false, e_flag=false, M_flag = false, T_flag=false, f_flag=false, p_flag = false, l_flag=false;
+	while((opt=getopt(argc, argv, "n:m:e:M:T:p:f:l:h")) != -1){
 		switch(opt){
 			case 'n':
 				n = atoi(optarg);
@@ -179,10 +184,6 @@ int main(int argc, char *argv[]){
 			case 'm':
 				m = atoi(optarg);
 				m_flag = true;
-				break;
-			case 'i':
-				iter = atoi(optarg);
-				i_flag = true;
 				break;
 			case 'e':
 				ber = atof(optarg);
@@ -204,39 +205,27 @@ int main(int argc, char *argv[]){
 				sprintf(filename, "%s", optarg);
 				f_flag = true;
 				break;
-			case 'c':
-				num_cores = (NUM_CORES > atoi(optarg))? atoi(optarg):NUM_CORES; 
-				break;
-			case 'F':
-				is_flexible = true;
-				F_flag = true;
-				break;
 			case 'l':
 				level = atoi(optarg);
 				l_flag = true;
 				break;
 			case 'h':
-				fprintf(stderr, "Usage: %s [-n n] [-m m] [-i #iterations] [-e bit-error rate] [-t #signals] [-f filename] [-c #cores] [-F] [-l #levels] \n", argv[0]);
+				fprintf(stderr,  argv[0]);
 				exit(EXIT_FAILURE);
 			default: /* '?' */
-				fprintf(stderr, "Usage: %s [-n n] [-m m] [-i #iterations] [-e bit-error rate] [-t #signals] [-f filename] [-c #cores] [-F] [-l #levels] \n", argv[0]);
+				fprintf(stderr, usage, argv[0]);
 				exit(EXIT_FAILURE);
 		}
 	}
 
 	/* Check if all necessary arguments were give */
-	if (!(n_flag && m_flag && i_flag && e_flag && T_flag && f_flag)){
-		fprintf(stderr, "Usage: %s [-n n] [-m m] [-i #iterations] [-e bit-error rate] [-t #signals] [-f filename] [-c #cores] [-F] [-l #levels] \n", argv[0]);
-		exit(EXIT_FAILURE);
-	}
-
-	if(F_flag && !l_flag){
-		fprintf(stderr, "You should specify how many levels you want to use with flexible(-F) option.");
+	if (!(n_flag && m_flag && e_flag && M_flag && T_flag && f_flag)){
+		fprintf(stderr, usage, argv[0]);
 		exit(EXIT_FAILURE);
 	}
 
 	/* Open input files */
-	if(T_flag){
+	if(p_flag){
 		strcat(filepath,"/");
 		strcat(filepath, filename);	
 	} else{
@@ -246,46 +235,50 @@ int main(int argc, char *argv[]){
 	/* Opening file for parity check matrix */
 	fp = fopen(filepath, "r");
 	if (fp == NULL){
-		fprintf(stderr, "Error opening file:%s\n", strerror(errno));
+		fprintf(stderr, usage, "Error opening file:%s\n", strerror(errno));
 		exit(EXIT_FAILURE);
 	}
 	/* Opening file for code structure */
 	char code_str_filepath[256];
 	strcpy(code_str_filepath, filepath);
-	strcat(filepath, "_code_str");
+	strcat(code_str_filepath, "_code_str");
 	code_str_fp = fopen(code_str_filepath, "r");
 	if (code_str_fp == NULL) {
-		fprintf(stderr, "Error opening file:%s\n", strerror(errno));
+		fprintf(stderr, "Error opening file:%s\n", code_str_filepath);
 		exit(EXIT_FAILURE);
 	}
 	
 	/* Print out informations */
 	printf("Testing (%d, %d) ", n, m);
-	if (is_flexible) printf("flexible ");	
 	printf("code using %d cores\n", num_cores);
 	printf("Bit error rate : %.5f\n", ber);
-	printf("# iterations in message passing algorithm: %d\n", iter);
-	printf("# of signals to try: %d\n", sig_iter);
+	printf("Target BER to achieve: %.4f\n", target_ber);
 	printf("Reading parity matrix from the file: %s\n", filename);
 
 
 	/* Read Code Structure */
 	/* 1. Read the depth */
 	fscanf(code_str_fp, "%d", &depth);
+	is_flexible = depth > 1;
 	/* 2. Read min/max degree */
 	fscanf(code_str_fp, "%d %d", &min_deg, &max_deg);
 	/* 3. Read length, degree distribution for each level */
 	int m[depth];
-	float rho[depth][max_deg-min_deg];
+	float rho[depth][max_deg-min_deg+1];
+	float temp = 0.0;
 	for (i=0; i < depth; i++){
 		fscanf(code_str_fp, "%d", &m[i]);
 		for(j = min_deg; j <= max_deg; j++){
-			fscanf(code_str_fp, "%.4f" &&rho[i][j]);
+			fscanf(code_str_fp, "%.4f", &temp);
+			rho[i][j-min_deg] = temp;
 		}	
 	}
 	/* 4. Adjust the decoding length/rho */
-	m_adapt = 0;
-	float rho_adapt[max_deg-min_deg];
+	int m_adapt = 0;
+	float rho_adapt[max_deg-min_deg+1];
+	for(i = 0; i <= (max_deg-min_deg); i++){
+		rho_adapt[i] = 0;
+	}
 	for (i = 0; i < level; i++){
 		m_adapt += m[i];
 		for(j = 0; j < (max_deg-min_deg); j++){
@@ -294,6 +287,12 @@ int main(int argc, char *argv[]){
 	}
 	fclose(code_str_fp);
 
+	/* Print out the read code structure */
+	if(is_flexible){
+		printf("Flexible Code with depth %d\n", depth);
+		printf("Using level upto %d\n", level);
+		printf("Decoding length = %d\n", m_adapt);
+	}
 	/* Read a parity check matrix */ 
 	parity_matrix = malloc(m_adapt * sizeof(char*));
 	for (i=0; i < m_adapt; i++){
@@ -313,6 +312,8 @@ int main(int argc, char *argv[]){
 	}
 	fclose(fp);
 
+	printf("Done Reading Files\n");
+
 	/* Initialze the node structures & connections */
 	struct node var_nodes[n];
 	struct node check_nodes[m_adapt];
@@ -326,33 +327,44 @@ int main(int argc, char *argv[]){
 	/* Start running belief propagation */
 	int num_sig = 100/(target_ber *  n);
 	int t;
+	unsigned int error_per_iter[max_iter];
+	int* result;
+	for (i = 0; i < max_iter; i++){
+		error_per_iter[i] = 0;
+	}
 	for (t = 0; t < num_sig; t++){
-		error_per_iter = belief_propagation(var_nodes, check_nodes);
 		if (t== 0){
 			printf("Start running belief propagation\n");
-		} else if(t % ITER_CUNK== 0){
-			printf("%d Completed.\n");
+			printf("Total %d signals will be tried\n", num_sig);
+		} else if(t % ITER_CHUNK== 0){
+			printf("%d Completed.\n", t);
+		}
+		result = belief_propagation(var_nodes, check_nodes, m_adapt);
+		for (i = 0; i < max_iter; i++){
+			error_per_iter[i] += result[i];
 		}
 	}
 
 	/* Print out the result */
 	printf("Summing up the result..\n");
-	float ber_per_iter[max_iter];
+	float ber_at_iter[max_iter];
+	for (i = 0; i < max_iter; i++){
+		ber_at_iter[i] = (float)error_per_iter[i]/ (float)(num_sig*n);
+	}
+	
 	char sum_filename[256];
-
-	if (is_flexible) sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBER_%dLevel", filename,iter,target_ber, ber, level);
-	else sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBE", filename,iter,target_ber, ber); 
+	if (is_flexible) sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBER_%dLevel", filename,max_iter,target_ber, ber, level);
+	else sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBE", filename,max_iter,target_ber, ber); 
 
 	fp = fopen(sum_filename, "w");
-	printf("BER at iteration");
-	for (i = 0; i < iter; i++){
-		printf("  %d\t\t", i+1);
+	printf("BER at iteration\n");
+	for (i = 0; i < max_iter; i++){
+		printf("%5d\t", i+1);
 	}
-	printf("\n                ");
-	fprintf(fp, "%d\n", iter);
-	for(i = 0; i< iter; i++){
+	printf("\n");
+	for(i = 0; i< max_iter; i++){
 		fprintf(fp, "%.10f\n", ber_at_iter[i]); 
-		printf("%.4f\t\t", ber_at_iter[i]);
+		printf("%.4f\t", ber_at_iter[i]);
 	}
 	printf("\n");
 	fclose(fp);
