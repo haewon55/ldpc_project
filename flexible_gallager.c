@@ -32,7 +32,7 @@ int level;	// level of depth you want to use for decoding
 int **deg_pairs;	// degree pairs for each depth
 
 
-void set_up_nodes(*var_nodes, *check_nodes){
+void set_up_nodes(*var_nodes, *check_nodes, _m, *rho){
 	int i,j; // integers for for loops
 
 	for (i = 0; i < _m; i++){
@@ -47,12 +47,21 @@ void set_up_nodes(*var_nodes, *check_nodes){
 	/* Initialize each var/check node 
 	 * Memory alloccation according to each degree
 	 */
+	int b; // integer to store temporary value of b
 	for (i = 0; i < n; i++){
 		var_nodes[i].neighbors = malloc(var_nodes[i].deg * sizeof(int));
 		var_nodes[i].neighbor_ports = malloc(var_nodes[i].deg * sizeof(int));
 		var_nodes[i].send_msg = malloc(var_nodes[i].deg * sizeof(char));
 		var_nodes[i].recv_msg = malloc(var_nodes[i].deg * sizeof(char));
 		var_nodes[i].port_temp = 0;
+		/* Calculate threshold b*/
+		double Al = 0;
+		double x = (double)(1 -2*ber);
+		for (i = min_deg; i <= max_deg; i++){
+			Al += rho[i-min_deg]*pow(x, i);
+		}
+		b  = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
+		var_nodes[i].b =  b > var_nodes[i].deg? var_nodes[i].deg : b;
 	}
 
 	for (i = 0; i < _m; i++){
@@ -81,28 +90,17 @@ void set_up_nodes(*var_nodes, *check_nodes){
 }
 
 
-int*  calc_threshold(*var_nodes, *check_nodes){
-	double Al = 0;
-	for (d = 0; d < level; d++){
-		Al += (double)m_l[d] / (double)m_l_tot * pow((double)(1-2*ber), deg_pairs[d][1] - 1);
-	}
-	int b[n];
-	for (i = 0; i < n; i++){
-		b[i] = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
-		b[i] = b[i] > var_nodes[i].deg? var_nodes[i].deg : b[i];
-	}
-
-	return b;
-}
-
-void beleif_proapagation(*var_nodes, *check_nodes){
+int* belief_proapagation(*var_nodes, *check_nodes){
+	int i, j, l; // integers for for loops
 	int parity;
 	char signal[n];
-	int error_per_iter;
 	float r;
+	int error_per_iter[max_iter];
+	for (i = 0; i < max_iter; i++){
+		error_per_iter[i] = 0;
+	}
 
 	/* Signal initialization */
-	error_per_iter = 0;
 	for (i = 0; i < n; i++){
 		r = (double)rand() / (double)RAND_MAX;
 		if (r < ber){
@@ -119,245 +117,52 @@ void beleif_proapagation(*var_nodes, *check_nodes){
 	}
 
 	/* Start message passing algorithm */
-	for (l = 0; l < iter; l++){
+	for (l = 0; l < max_iter; l++){
 		/* check node operations
 			- receive message from variable nodes
 			- perform parity checking
 			- generate send messages
 	   */
-		error_per_iter = 0;
-		for(j = 0; j < _m; j++){
+		for(i = 0; i < _m; i++){
 			parity = 0;
-			for (c = 0; c < check_nodes[j].deg; c++){
-				check_nodes[j].recv_msg[c] = var_nodes[check_nodes[j].neighbors[c]].send_msg[check_nodes[j].neighbor_ports[c]];
-				parity += check_nodes[j].recv_msg[c]; 
+			for (j = 0; j < check_nodes[j].deg; j++){
+				check_nodes[i].recv_msg[j] = var_nodes[check_nodes[i].neighbors[j]].send_msg[check_nodes[i].neighbor_ports[j]];
+				parity += check_nodes[i].recv_msg[j]; 
 			}
-			for (c = 0; c < check_nodes[j].deg; c++){
-				check_nodes[j].send_msg[c] = (parity + check_nodes[j].recv_msg[c]) % 2;
+			for (j = 0; j < check_nodes[i].deg; j++){
+				check_nodes[i].send_msg[j] = (parity + check_nodes[i].recv_msg[j]) % 2;
 			}
 		}
 
 		/* variable node operations
 		    - receive message from check nodes
 			- generate send messages
-			- beleif update
+			- belief update
 		*/
 		for (i = 0; i < n; i++){
 			parity = 0;
-			for(c = 0; c < var_nodes[i].deg; c++){
-				var_nodes[i].recv_msg[c] = check_nodes[var_nodes[i].neighbors[c]].send_msg[var_nodes[i].neighbor_ports[c]];
-				parity += var_nodes[i].recv_msg[c];
+			for(j = 0; j < var_nodes[i].deg; j++){
+				var_nodes[i].recv_msg[j] = check_nodes[var_nodes[i].neighbors[j]].send_msg[var_nodes[i].neighbor_ports[j]];
+				parity += var_nodes[i].recv_msg[j];
 			}
-			for(c = 0; c < var_nodes[i].deg; c++){
-				if ((parity - var_nodes[i].recv_msg[c]) >=  b[i]){
-					var_nodes[i].send_msg[c] = 1;
-				} else if((parity - var_nodes[i].recv_msg[c]) <= (var_nodes[i].deg - b[i]) ){
-					var_nodes[i].send_msg[c] = 0;
+			for(j = 0; j < var_nodes[i].deg; j++){
+				if ((parity - var_nodes[i].recv_msg[j]) >=  b[i]){
+					var_nodes[i].send_msg[j] = 1;
+				} else if((parity - var_nodes[i].recv_msg[j]) <= (var_nodes[i].deg - b[i]) ){
+					var_nodes[i].send_msg[j] = 0;
 				} else{
-					var_nodes[i].send_msg[c] = signal[i];
+					var_nodes[i].send_msg[j] = signal[i];
 				}
 			}
 
 			if (parity > (var_nodes[i].deg/2)){
-				//belief[i] = 1;
-				error_per_iter++;
-			} else {
-				//belief[i] = 0;
+				error_per_iter[l]++;
 			}
 		}
-		fprintf(write_fp, "%d\t", error_per_iter);
 	}
-	fprintf(write_fp, "\n");
-	}
-	printf("%d completed\n", sig_iter);
 
-	fclose(write_fp);
-	return 0;
+	return error_per_iter;
 }
-
-
-void *flexible_thr_func(void *arg){
-
-	/* initialize var/check nodes */
-	int i,j,l,t,d,c=0;
-	int m_l[depth], m_l_tot = 0;
-	struct node var_nodes[n];
-	struct node check_nodes[m];
-	int _m = m;
-
-	/* Initialize degrees.
-	   This steddp can be skipped if it's a regular code */
-
-	for(d = 0; d < depth; d++){
-		m_l[d] = n * deg_pairs[d][0]/deg_pairs[d][1];
-	}
-
-	for(d = 0; d < level; d++){
-		m_l_tot += m_l[d];
-	}
-
-	if (~is_sequential) _m = m_l_tot;
-
-
-	for (i = 0; i < n; i++){
-		var_nodes[i].deg = 0;
-	}
-	for (j = 0; j < _m; j++){
-		check_nodes[j].deg = 0;
-	}
-
-	for (i = 0; i < _m; i++){
-		for(j = 0; j < n ; j++){
-			if (parity_matrix[i][j] == 1){
-				var_nodes[j].deg++;
-				check_nodes[i].deg++;
-			}
-		}
-	}
-
-
-	/* Initialize each var/check node 
-	 * Memory alloccation according to each degree
-	 */
-	for (i = 0; i < n; i++){
-		var_nodes[i].neighbors = malloc(var_nodes[i].deg * sizeof(int));
-		var_nodes[i].neighbor_ports = malloc(var_nodes[i].deg * sizeof(int));
-		var_nodes[i].send_msg = malloc(var_nodes[i].deg * sizeof(char));
-		var_nodes[i].recv_msg = malloc(var_nodes[i].deg * sizeof(char));
-		var_nodes[i].port_temp = 0;
-	}
-
-	for (i = 0; i < _m; i++){
-		check_nodes[i].neighbors = malloc(check_nodes[i].deg * sizeof(int));
-		check_nodes[i].neighbor_ports = malloc(check_nodes[i].deg * sizeof(int));
-		check_nodes[i].send_msg = malloc(check_nodes[i].deg * sizeof(char));
-		check_nodes[i].recv_msg = malloc(check_nodes[i].deg * sizeof(char));
-		check_nodes[i].port_temp = 0;
-	}
-
-	/* Initialize connections between nodes
-	 * Construct port-to-port connections
-	 */
-	for(i = 0; i < _m; i++){
-		for(j = 0; j < n; j++){
-			if(parity_matrix[i][j] == 1){
-				var_nodes[j].neighbors[var_nodes[j].port_temp] = i;
-				check_nodes[i].neighbors[check_nodes[i].port_temp] = j;
-				var_nodes[j].neighbor_ports[var_nodes[j].port_temp] = check_nodes[i].port_temp;
-				check_nodes[i].neighbor_ports[check_nodes[i].port_temp] = var_nodes[j].port_temp;
-				var_nodes[j].port_temp++;
-				check_nodes[i].port_temp++;
-			}
-		}
-	}
-	
-
-	int parity;
-	/* TODO: Need improvement.
-	   Don't know how to deal with this threshold. */
-	double Al = 0;
-	for (d = 0; d < level; d++){
-		Al += (double)m_l[d] / (double)m_l_tot * pow((double)(1-2*ber), deg_pairs[d][1] - 1);
-	}
-	int b[n];
-	for (i = 0; i < n; i++){
-		b[i] = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
-		b[i] = b[i] > var_nodes[i].deg? var_nodes[i].deg : b[i];
-	}
-
-	printf("%d\n", b[0]);
-	int iter_chunks = 0;
-	FILE *write_fp;
-	char write_filename[200];
-	if (is_flexible) sprintf(write_filename, "./results_details/%s_%diter_%dsig_%.4fBER_%dlevel_CORE%d", filename,iter,sig_iter, ber, level, cpu);
-	else sprintf(write_filename, "./results_details/%s_%diter_%dsig_%.4fBER_CORE%d", filename,iter,sig_iter, ber, cpu); 
-	write_fp = fopen(write_filename, "w");
-	
-	char signal[n];
-	//char belief[n];
-	int error_per_iter;
-	float r;
-
-	for (t = 0; t < sig_iter; t++){
-	if ((t+1) % ITER_CHUNK == 0){
-		printf("CORE %d: %d Done.\n", cpu, ++iter_chunks * ITER_CHUNK);
-	}	
-
-	/* Signal initialization */
-	error_per_iter = 0;
-	for (i = 0; i < n; i++){
-		r = (double)rand() / (double)RAND_MAX;
-		if (r < ber){
-			signal[i] = 1;
-			error_per_iter++;
-		} else {
-			signal[i] = 0;
-		}
-		//belief[i] = signal[i];
-		/* Setting first variable messages */
-		for(c = 0; c < var_nodes[i].deg; c++){
-			var_nodes[i].send_msg[c] = signal[i];
-		}
-	}
-
-	/* Start message passing algorithm */
-	for (l = 0; l < iter; l++){
-		/* check node operations
-			- receive message from variable nodes
-			- perform parity checking
-			- generate send messages
-	   */
-		error_per_iter = 0;
-		for(j = 0; j < _m; j++){
-			parity = 0;
-			for (c = 0; c < check_nodes[j].deg; c++){
-				check_nodes[j].recv_msg[c] = var_nodes[check_nodes[j].neighbors[c]].send_msg[check_nodes[j].neighbor_ports[c]];
-				parity += check_nodes[j].recv_msg[c]; 
-			}
-			for (c = 0; c < check_nodes[j].deg; c++){
-				check_nodes[j].send_msg[c] = (parity + check_nodes[j].recv_msg[c]) % 2;
-			}
-		}
-
-		/* variable node operations
-		    - receive message from check nodes
-			- generate send messages
-			- beleif update
-		*/
-		for (i = 0; i < n; i++){
-			parity = 0;
-			for(c = 0; c < var_nodes[i].deg; c++){
-				var_nodes[i].recv_msg[c] = check_nodes[var_nodes[i].neighbors[c]].send_msg[var_nodes[i].neighbor_ports[c]];
-				parity += var_nodes[i].recv_msg[c];
-			}
-			for(c = 0; c < var_nodes[i].deg; c++){
-				if ((parity - var_nodes[i].recv_msg[c]) >=  b[i]){
-					var_nodes[i].send_msg[c] = 1;
-				} else if((parity - var_nodes[i].recv_msg[c]) <= (var_nodes[i].deg - b[i]) ){
-					var_nodes[i].send_msg[c] = 0;
-				} else{
-					var_nodes[i].send_msg[c] = signal[i];
-				}
-			}
-
-			if (parity > (var_nodes[i].deg/2)){
-				//belief[i] = 1;
-				error_per_iter++;
-			} else {
-				//belief[i] = 0;
-			}
-		}
-		fprintf(write_fp, "%d\t", error_per_iter);
-	}
-	fprintf(write_fp, "\n");
-	}
-	printf("%d completed\n", sig_iter);
-
-	fclose(write_fp);
-	return 0;
-
-}
-
 
 
 int main(int argc, char *argv[]){
@@ -478,22 +283,26 @@ int main(int argc, char *argv[]){
 			fscanf(code_str_fp, "%.4f" &&rho[i][j]);
 		}	
 	}
-	/* 4. Decide the code length to run */
-	m = 0;
+	/* 4. Adjust the decoding length/rho */
+	m_adapt = 0;
+	float rho_adapt[max_deg-min_deg];
 	for (i = 0; i < level; i++){
-		m += m[i];
+		m_adapt += m[i];
+		for(j = 0; j < (max_deg-min_deg); j++){
+			rho_adapt[j] += rho[i][j];
+		}
 	}
+	fclose(code_str_fp);
 
-
-	/* Reading a parity matrix */ 
-	parity_matrix = malloc(m * sizeof(char*));
-	for (i=0; i < m; i++){
+	/* Read a parity check matrix */ 
+	parity_matrix = malloc(m_adapt * sizeof(char*));
+	for (i=0; i < m_adapt; i++){
 		parity_matrix[i] = malloc(n*sizeof(char));
 	}
-	for (i=0; i < m; i++){
+	for (i=0; i < m_adapt; i++){
 		fscanf(fp, "%s", parity_matrix[i]);
 	}
-	for (i=0; i< m; i++){
+	for (i=0; i< m_adapt; i++){
 		for(j=0; j<n; j++){
 			if (parity_matrix[i][j]=='1'){
 				parity_matrix[i][j] = 1;
@@ -505,64 +314,34 @@ int main(int argc, char *argv[]){
 	fclose(fp);
 
 	/* Initialze the node structures & connections */
-
+	struct node var_nodes[n];
+	struct node check_nodes[m_adapt];
+	
+	set_up_nodes(var_nodes, check_nodes, m_adapt, rho_adapt);
 
 	/* Initialize the seed for random number generation */
 	time_t init_time;
 	srand((unsigned)time(&init_time));
-	
-	/* Calculating threshold */
-	double Al = 0;
-	for (d = 0; d < level; d++){	
-		Al += (double)m_l[d] / (double)m_l_tot * pow((double)(1-2*ber), deg_pairs[d][1] - 1);
-	}
-	
-	int b[n];
-	for (i = 0; i < n; i++){
-		b[i] = ceil((log((1-ber)/ber)/log((1+Al)/(1-Al)) + var_nodes[i].deg -1)/2);
-		b[i] = b[i] > var_nodes[i].deg? var_nodes[i].deg : b[i];
-	}
-	
 
-	struct node var_nodes[n];
-	struct node check_nodes[m];
-	
-	set_up_nodes(var_nodes, check_nodes);
-
-	int num_iter = 1/target_ber * 100;
+	/* Start running belief propagation */
+	int num_sig = 100/(target_ber *  n);
 	int t;
-
-	for (t = 0; t < num_iter; t++){
-		error_per_iter = beleif_propagation(var_nodes, check_nodes);
-
-	}
-
-	/*printf("Summing up the result..\n");
-	float ber_at_iter[iter];
-	char sum_filename[200];
-	for (i = 0; i < iter; i++){
-			ber_at_iter[i] = 0.0;
-	}
-	int sig_iter_per_core, val;
-	for(ci = 0; ci < num_cores; ci++){
-		sig_iter_per_core = thread_datas[ci].sig_iter_per_core;
-		if (is_flexible) sprintf(sum_filename, "./results_details/%s_%diter_%dsig_%.4fBER_%dlevel_CORE%d", filename,iter,sig_iter_per_core, ber, level, ci);
-	   	else sprintf(sum_filename, "./results_details/%s_%diter_%dsig_%.4fBER_CORE%d", filename,iter,sig_iter_per_core, ber, ci); 
-		fp = fopen(sum_filename, "r");
-		for(j = 0; j < sig_iter_per_core; j++){
-			for(i = 0; i < iter; i++){
-				fscanf(fp, "%d\t", &val);
-				ber_at_iter[i] += (double)val/(double)n;
-			}
+	for (t = 0; t < num_sig; t++){
+		error_per_iter = belief_propagation(var_nodes, check_nodes);
+		if (t== 0){
+			printf("Start running belief propagation\n");
+		} else if(t % ITER_CUNK== 0){
+			printf("%d Completed.\n");
 		}
-		fclose(fp);
-	}
-	for(i = 0; i < iter; i++){
-		ber_at_iter[i] = (double)ber_at_iter[i]/(double)sig_iter;
 	}
 
-	if (is_flexible) sprintf(sum_filename, "./results/%s_%diter_%dsig_%.4fBER_%dlevel", filename,iter,sig_iter, ber, level);
-	else sprintf(sum_filename, "./results/%s_%diter_%dsig_%.4fBER", filename,iter,sig_iter, ber); 
+	/* Print out the result */
+	printf("Summing up the result..\n");
+	float ber_per_iter[max_iter];
+	char sum_filename[256];
+
+	if (is_flexible) sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBER_%dLevel", filename,iter,target_ber, ber, level);
+	else sprintf(sum_filename, "%s_%dIter_%.4fTarget_%.4fBE", filename,iter,target_ber, ber); 
 
 	fp = fopen(sum_filename, "w");
 	printf("BER at iteration");
@@ -576,11 +355,9 @@ int main(int argc, char *argv[]){
 		printf("%.4f\t\t", ber_at_iter[i]);
 	}
 	printf("\n");
-	fclose(fp);*/
+	fclose(fp);
 	return EXIT_SUCCESS;
 
-	}
-
-
+}
 
 
